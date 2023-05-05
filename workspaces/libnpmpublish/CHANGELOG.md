@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.2.0](https://github.com/npm/cli/compare/libnpmpublish-v7.1.4...libnpmpublish-v7.2.0) (2023-05-05)
+
+### Features
+
+* [`bdab631`](https://github.com/npm/cli/commit/bdab631b9847013dc4e8d4083669acf6c7bfb457) [#6428](https://github.com/npm/cli/pull/6428) expose provenance transparency url (#6428) (@JamesHenry, @wraithgar)
+
 ## [7.1.4](https://github.com/npm/cli/compare/libnpmpublish-v7.1.3...libnpmpublish-v7.1.4) (2023-05-03)
 
 ### Dependencies
