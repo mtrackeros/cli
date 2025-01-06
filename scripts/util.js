@@ -1,7 +1,7 @@
-const fsp = require('fs/promises')
-const { resolve, join, relative } = require('path')
-const { formatWithOptions } = require('util')
-const log = require('proc-log')
+const fsp = require('node:fs/promises')
+const { resolve, join, relative } = require('node:path')
+const { formatWithOptions } = require('node:util')
+const { log } = require('proc-log')
 const nopt = require('nopt')
 const npmGit = require('@npmcli/git')
 const promiseSpawn = require('@npmcli/promise-spawn')
@@ -13,10 +13,16 @@ const EOL = '\n'
 const CWD = resolve(__dirname, '..')
 
 const pkg = require(join(CWD, 'package.json'))
-pkg.mapWorkspaces = async () => {
+pkg.mapWorkspaces = async ({ public = false } = {}) => {
   const ws = []
   for (const [name, path] of await mapWorkspaces({ pkg })) {
-    ws.push({ name, path, pkg: require(join(path, 'package.json')) })
+    const pkgJson = require(join(path, 'package.json'))
+
+    if (public && pkgJson.private) {
+      continue
+    }
+
+    ws.push({ name, path, pkg: pkgJson })
   }
   return ws
 }
@@ -126,7 +132,7 @@ git.dirty = () => npmGit.isClean({ cwd: CWD }).then(async r => {
     return 'git clean'
   }
   await git('status', '--porcelain=v1', '-uno')
-  await git('diff')
+  await git('--no-pager', 'diff')
   throw new Error('git dirty')
 })
 

@@ -1,15 +1,16 @@
-const fs = require('fs/promises')
-const { existsSync } = require('fs')
-const { join, resolve, sep, extname, relative, delimiter } = require('path')
+const fs = require('node:fs/promises')
+const { existsSync } = require('node:fs')
+const { join, resolve, sep, extname, relative, delimiter } = require('node:path')
 const which = require('which')
 const spawn = require('@npmcli/promise-spawn')
 const MockRegistry = require('@npmcli/mock-registry')
-const http = require('http')
-const httpProxy = require('http-proxy')
+const http = require('node:http')
+const { createProxy } = require('proxy')
 
-const { SMOKE_PUBLISH_NPM, SMOKE_PUBLISH_TARBALL, CI, PATH, Path, TAP_CHILD_ID = '0' } = process.env
-const PROXY_PORT = 12345 + (+TAP_CHILD_ID)
-const HTTP_PROXY = `http://localhost:${PROXY_PORT}/`
+const { SMOKE_PUBLISH_TARBALL, CI, PATH, Path } = process.env
+
+const DEFAULT_REGISTRY = new URL('https://registry.npmjs.org/')
+const MOCK_REGISTRY = new URL('http://smoke-test-registry.club/')
 
 const NODE_PATH = process.execPath
 const CLI_ROOT = resolve(process.cwd(), '..')
@@ -43,8 +44,8 @@ const testdirHelper = (obj) => {
   return obj
 }
 
-const getNpmRoot = (helpText) => {
-  return helpText
+const getNpmRoot = (r) => {
+  return r.stdout
     .split('\n')
     .slice(-1)[0]
     .match(/^npm@.*?\s(.*)$/)
@@ -72,26 +73,12 @@ const getCleanPaths = async () => {
   })
 }
 
-const createRegistry = async (t, { debug, ...opts } = {}) => {
-  const registry = new MockRegistry({
-    tap: t,
-    registry: 'http://smoke-test-registry.club/',
-    debug,
-    strict: true,
-    ...opts,
-  })
+module.exports = async (t, {
+  testdir = {}, debug, mockRegistry = true, strictRegistryNock = true, useProxy = false,
+} = {}) => {
+  const debugLog = debug || CI ? (...a) => t.comment(...a) : () => {}
+  debugLog({ SMOKE_PUBLISH_TARBALL, CI })
 
-  const proxy = httpProxy.createProxyServer({})
-  const server = http.createServer((req, res) => proxy.web(req, res, { target: registry.origin }))
-  await new Promise(res => server.listen(PROXY_PORT, res))
-
-  t.teardown(() => server.close())
-
-  return registry
-}
-
-module.exports = async (t, { testdir = {}, debug, registry: _registry = {} } = {}) => {
-  const debugLog = debug || CI ? (...a) => console.error(...a) : () => {}
   const cleanPaths = await getCleanPaths()
 
   // setup fixtures
@@ -114,7 +101,21 @@ module.exports = async (t, { testdir = {}, debug, registry: _registry = {} } = {
     globalNodeModules: join(root, 'global', GLOBAL_NODE_MODULES),
   }
 
-  const registry = await createRegistry(t, { ..._registry, debug })
+  const registry = !mockRegistry ? DEFAULT_REGISTRY : new MockRegistry({
+    tap: t,
+    registry: MOCK_REGISTRY,
+    debug,
+    strict: strictRegistryNock,
+  })
+
+  const proxyEnv = {}
+  if (useProxy || mockRegistry) {
+    useProxy = true
+    const proxyServer = createProxy(http.createServer())
+    await new Promise(res => proxyServer.listen(0, res))
+    t.teardown(() => proxyServer.close())
+    proxyEnv.HTTP_PROXY = new URL(`http://localhost:${proxyServer.address().port}`)
+  }
 
   // update notifier should never be written
   t.afterEach((t) => {
@@ -138,7 +139,6 @@ module.exports = async (t, { testdir = {}, debug, registry: _registry = {} } = {
     }
     return s
       .split(relative(CLI_ROOT, t.testdirName)).join('{TESTDIR}')
-      .split(HTTP_PROXY).join('{PROXY_REGISTRY}')
       .split(registry.origin).join('{REGISTRY}')
       .replace(/\\+/g, '/')
       .replace(/\r\n/g, '\n')
@@ -153,12 +153,16 @@ module.exports = async (t, { testdir = {}, debug, registry: _registry = {} } = {
   const getPath = () => `${paths.globalBin}${delimiter}${Path || PATH}`
   const getEnvPath = () => ({ [Path ? 'Path' : 'PATH']: getPath() })
 
-  const baseSpawn = async (spawnCmd, spawnArgs, { cwd = paths.project, env, ...opts } = {}) => {
+  const baseSpawn = async (spawnCmd, spawnArgs, {
+    cwd = paths.project,
+    env,
+    ...opts } = {}
+  ) => {
     log(`CWD: ${cwd}`)
     log(`${spawnCmd} ${spawnArgs.join(' ')}`)
     log('-'.repeat(40))
 
-    const { stderr, stdout } = await spawn(spawnCmd, spawnArgs, {
+    const p = spawn(spawnCmd, spawnArgs, {
       cwd,
       env: {
         ...getEnvPath(),
@@ -169,21 +173,23 @@ module.exports = async (t, { testdir = {}, debug, registry: _registry = {} } = {
       ...opts,
     })
 
-    log(stderr)
-    log('-'.repeat(40))
-    log(stdout)
+    // In debug mode, stream stdout and stderr to console so we can debug hanging processes
+    p.process.stdout.on('data', (c) => log(c.toString().trim()))
+    p.process.stderr.on('data', (c) => log(c.toString().trim()))
+
+    const { stdout, stderr } = await p
     log('='.repeat(40))
 
-    return stdout
+    return { stderr, stdout }
   }
 
   const baseNpm = async (...a) => {
-    const [{ cwd, cmd, argv = [], proxy = true, ...opts }, args] = getOpts(...a)
+    const [{ cwd, cmd, argv = [], proxy = useProxy, ...opts }, args] = getOpts(...a)
 
     const isGlobal = args.some(arg => ['-g', '--global', '--global=true'].includes(arg))
 
     const defaultFlags = [
-      proxy ? `--registry=${HTTP_PROXY}` : null,
+      `--registry=${registry.origin}`,
       `--cache=${paths.cache}`,
       `--prefix=${isGlobal ? paths.global : cwd}`,
       `--userconfig=${paths.userConfig}`,
@@ -205,14 +211,17 @@ module.exports = async (t, { testdir = {}, debug, registry: _registry = {} } = {
 
     return baseSpawn(cmd, [...argv, ...cliArgv], {
       cwd,
-      env: proxy ? { HTTP_PROXY } : {},
+      env: {
+        ...opts.env,
+        ...proxy ? proxyEnv : {},
+      },
       ...opts,
     })
   }
 
   const npmLocal = async (...args) => {
     const [{ force = false }] = getOpts(...args)
-    if (SMOKE_PUBLISH_NPM && !force) {
+    if (SMOKE_PUBLISH_TARBALL && !force) {
       throw new Error('npmLocal cannot be called during smoke-publish')
     }
     return baseNpm({
@@ -244,14 +253,17 @@ module.exports = async (t, { testdir = {}, debug, registry: _registry = {} } = {
   return {
     npmPath,
     npmLocal,
-    npm: SMOKE_PUBLISH_NPM ? npmPath : npm,
+    npm: SMOKE_PUBLISH_TARBALL ? npmPath : npm,
     spawn: baseSpawn,
     readFile,
     getPath,
     paths,
     registry,
     npmLocalTarball: async () => SMOKE_PUBLISH_TARBALL ??
-      npmLocal('pack', `--pack-destination=${root}`).then(r => join(root, r)),
+      npmLocal('pack', `--pack-destination=${root}`).then(r => {
+        const output = r.stdout.trim().split('\n')
+        return join(root, output[output.length - 1])
+      }),
   }
 }
 
@@ -259,6 +271,6 @@ module.exports.testdir = testdirHelper
 module.exports.getNpmRoot = getNpmRoot
 module.exports.CLI_ROOT = CLI_ROOT
 module.exports.WINDOWS = WINDOWS
-module.exports.SMOKE_PUBLISH = !!SMOKE_PUBLISH_NPM
+module.exports.SMOKE_PUBLISH = !!SMOKE_PUBLISH_TARBALL
 module.exports.SMOKE_PUBLISH_TARBALL = SMOKE_PUBLISH_TARBALL
-module.exports.HTTP_PROXY = HTTP_PROXY
+module.exports.MOCK_REGISTRY = MOCK_REGISTRY

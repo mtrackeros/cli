@@ -7,7 +7,7 @@
 /configure text eol=lf
 
 # our cmd scripts always need to be CRLF
-/bin/*.cmd text eol=crlf
+/bin/**/*.cmd text eol=crlf
 
 # ignore all line endings in node_modules since we dont control that
 /node_modules/** -text
@@ -16,6 +16,7 @@
 /node_modules/.gitignore text eol=lf
 /workspaces/arborist/test/fixtures/.gitignore text eol=lf
 /DEPENDENCIES.md text eol=lf
+/DEPENDENCIES.json text eol=lf
 /AUTHORS text eol=lf
 
 # fixture tarballs should be treated as binary
