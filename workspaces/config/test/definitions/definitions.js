@@ -1,5 +1,5 @@
 const t = require('tap')
-const { resolve } = require('path')
+const { resolve } = require('node:path')
 const mockGlobals = require('@npmcli/mock-globals')
 
 // have to fake the node version, or else it'll only pass on this one
@@ -10,6 +10,18 @@ const mockDefs = (mocks = {}) => t.mock('../../lib/definitions/definitions.js', 
 const isWin = (t, isWindows) => {
   mockGlobals(t, { 'process.platform': isWindows ? 'win32' : 'not-windows' })
 }
+
+t.test('all exported definitions seem like definitions and are sorted', t => {
+  const definitions = mockDefs()
+  const keys = Object.keys(definitions)
+  const sortedKeys = keys.sort((a, b) => a.localeCompare(b, 'en'))
+  for (const def of keys) {
+    t.ok(definitions[def].validate, `${def} has a validate function`)
+    t.ok(definitions[def].key, `${def} has a key`)
+  }
+  t.strictSame(keys, sortedKeys, 'definitions are sorted by key')
+  t.end()
+})
 
 t.test('basic flattening function camelCases from css-case', t => {
   const flat = {}
@@ -83,7 +95,7 @@ t.test('local-address allowed types', t => {
         eth69: [{ address: 'no place like home' }],
       }),
     }
-    const defs = mockDefs({ os })
+    const defs = mockDefs({ 'node:os': os })
     t.same(defs['local-address'].type, [
       null,
       '127.0.0.1',
@@ -98,7 +110,7 @@ t.test('local-address allowed types', t => {
         throw new Error('no network interfaces for some reason')
       },
     }
-    const defs = mockDefs({ os })
+    const defs = mockDefs({ 'node:os': os })
     t.same(defs['local-address'].type, [null])
     t.end()
   })
@@ -146,7 +158,7 @@ t.test('cache', t => {
 
   const flat = {}
   defsNix.cache.flatten('cache', { cache: '/some/cache/value' }, flat)
-  const { join } = require('path')
+  const { join } = require('node:path')
   t.equal(flat.cache, join('/some/cache/value', '_cacache'))
   t.equal(flat.npxCache, join('/some/cache/value', '_npx'))
 
@@ -384,6 +396,7 @@ t.test('color', t => {
 t.test('progress', t => {
   const setEnv = ({ tty, term } = {}) => mockGlobals(t, {
     'process.stderr.isTTY': tty,
+    'process.stdout.isTTY': tty,
     'process.env.TERM': term,
   })
 
@@ -716,8 +729,8 @@ YYYY\r
   t.test('error other than ENOENT gets thrown', t => {
     const poo = new Error('poo')
     const defnReadFileThrows = mockDefs({
-      fs: {
-        ...require('fs'),
+      'node:fs': {
+        ...require('node:fs'),
         readFileSync: () => {
           throw poo
         },
@@ -730,45 +743,41 @@ YYYY\r
   t.end()
 })
 
-t.test('detect CI', t => {
-  const defnNoCI = mockDefs({
-    'ci-info': { isCI: false, name: null },
-  })
-  const defnCIFoo = mockDefs({
-    'ci-info': { isCI: false, name: 'foo' },
-  })
-  t.equal(defnNoCI['ci-name'].default, null, 'null when not in CI')
-  t.equal(defnCIFoo['ci-name'].default, 'foo', 'name of CI when in CI')
-  t.end()
-})
-
 t.test('user-agent', t => {
   const npmVersion = '1.2.3'
   const obj = {
     'npm-version': npmVersion,
-    'user-agent': mockDefs()['user-agent'].default,
+    'user-agent': mockDefs({
+      'ci-info': { isCi: false, name: null },
+    })['user-agent'].default,
   }
   const flat = {}
   const expectNoCI = `npm/${npmVersion} node/${process.version} ` +
     `${process.platform} ${process.arch} workspaces/false`
-  mockDefs()['user-agent'].flatten('user-agent', obj, flat)
+  mockDefs({
+    'ci-info': { isCi: false, name: null },
+  })['user-agent'].flatten('user-agent', obj, flat)
   t.equal(flat.userAgent, expectNoCI)
   t.equal(process.env.npm_config_user_agent, flat.userAgent, 'npm_user_config environment is set')
   t.not(obj['user-agent'], flat.userAgent, 'config user-agent template is not translated')
 
-  obj['ci-name'] = 'foo'
-  obj['user-agent'] = mockDefs()['user-agent'].default
+  obj['user-agent'] = mockDefs({
+    'ci-info': { isCi: true, name: 'foo' },
+  })['user-agent'].default
   const expectCI = `${expectNoCI} ci/foo`
-  mockDefs()['user-agent'].flatten('user-agent', obj, flat)
+  mockDefs({
+    'ci-info': { isCi: true, name: 'foo' },
+  })['user-agent'].flatten('user-agent', obj, flat)
   t.equal(flat.userAgent, expectCI)
   t.equal(process.env.npm_config_user_agent, flat.userAgent, 'npm_user_config environment is set')
   t.not(obj['user-agent'], flat.userAgent, 'config user-agent template is not translated')
 
-  delete obj['ci-name']
   obj.workspaces = true
   obj['user-agent'] = mockDefs()['user-agent'].default
   const expectWorkspaces = expectNoCI.replace('workspaces/false', 'workspaces/true')
-  mockDefs()['user-agent'].flatten('user-agent', obj, flat)
+  mockDefs({
+    'ci-info': { isCi: false, name: null },
+  })['user-agent'].flatten('user-agent', obj, flat)
   t.equal(flat.userAgent, expectWorkspaces)
   t.equal(process.env.npm_config_user_agent, flat.userAgent, 'npm_user_config environment is set')
   t.not(obj['user-agent'], flat.userAgent, 'config user-agent template is not translated')
@@ -776,7 +785,9 @@ t.test('user-agent', t => {
   delete obj.workspaces
   obj.workspace = ['foo']
   obj['user-agent'] = mockDefs()['user-agent'].default
-  mockDefs()['user-agent'].flatten('user-agent', obj, flat)
+  mockDefs({
+    'ci-info': { isCi: false, name: null },
+  })['user-agent'].flatten('user-agent', obj, flat)
   t.equal(flat.userAgent, expectWorkspaces)
   t.equal(process.env.npm_config_user_agent, flat.userAgent, 'npm_user_config environment is set')
   t.not(obj['user-agent'], flat.userAgent, 'config user-agent template is not translated')
